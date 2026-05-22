@@ -2,16 +2,66 @@ use once_cell::sync::Lazy;
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
 use std::fs::File;
 use std::io::BufReader;
+use std::sync::Mutex;
 use std::sync::mpsc;
 use std::thread;
 use colored::Colorize;
 
+// Sound configuration
+static SOUND_CONFIG: Lazy<Mutex<SoundConfig>> = Lazy::new(|| Mutex::new(SoundConfig::default()));
+
+#[derive(Debug, Clone)]
+pub struct SoundConfig {
+    pub success_freq1: f32,
+    pub success_freq2: f32,
+    pub success_duration1: u64,
+    pub success_duration2: u64,
+    pub error_freq1: f32,
+    pub error_freq2: f32,
+    pub error_duration1: u64,
+    pub error_duration2: u64,
+    pub warning_freq: f32,
+    pub warning_duration: u64,
+    pub beep_freq: f32,
+    pub beep_duration: u64,
+}
+
+impl SoundConfig {
+    pub fn default() -> Self {
+        Self {
+            success_freq1: 440.0,
+            success_freq2: 880.0,
+            success_duration1: 200,
+            success_duration2: 200,
+            error_freq1: 220.0,
+            error_freq2: 110.0,
+            error_duration1: 300,
+            error_duration2: 300,
+            warning_freq: 660.0,
+            warning_duration: 150,
+            beep_freq: 440.0,
+            beep_duration: 150,
+        }
+    }
+}
+
+pub fn configure_sounds(config: &crate::Config) {
+    let mut sound_config = SOUND_CONFIG.lock().unwrap();
+    sound_config.success_freq1 = config.success_freq1;
+    sound_config.success_freq2 = config.success_freq2;
+    sound_config.success_duration1 = config.success_duration1;
+    sound_config.success_duration2 = config.success_duration2;
+    sound_config.error_freq1 = config.error_freq1;
+    sound_config.error_freq2 = config.error_freq2;
+    sound_config.error_duration1 = config.error_duration1;
+    sound_config.error_duration2 = config.error_duration2;
+    sound_config.warning_freq = config.warning_freq;
+    sound_config.warning_duration = config.warning_duration;
+    sound_config.beep_freq = config.beep_freq;
+    sound_config.beep_duration = config.beep_duration;
+}
+
 // ── Audio handle ─────────────────────────────────────────────────────────────
-//
-// `OutputStream` is !Send because CPAL's platform stream contains a raw pointer.
-// The correct approach is to keep the `OutputStream` alive on a dedicated
-// background thread (so it never crosses a thread boundary) and only share the
-// `OutputStreamHandle`, which *is* Send + Sync.
 
 static STREAM_HANDLE: Lazy<OutputStreamHandle> = Lazy::new(|| {
     let (tx, rx) = mpsc::sync_channel::<OutputStreamHandle>(1);
@@ -19,11 +69,9 @@ static STREAM_HANDLE: Lazy<OutputStreamHandle> = Lazy::new(|| {
     thread::Builder::new()
         .name("messagio-audio".into())
         .spawn(move || {
-            // OutputStream must be created and dropped on the same thread.
             let (_stream, handle) = OutputStream::try_default()
                 .expect("messagio: failed to open audio output");
             tx.send(handle).expect("messagio: audio handle send failed");
-            // Park forever — dropping `_stream` would close the device.
             loop {
                 thread::park();
             }
@@ -34,27 +82,29 @@ static STREAM_HANDLE: Lazy<OutputStreamHandle> = Lazy::new(|| {
 });
 
 pub fn play_success() -> Result<(), String> {
-    play_beep(440.0, 200)?;
+    let config = SOUND_CONFIG.lock().unwrap();
+    play_beep(config.success_freq1, config.success_duration1)?;
     thread::sleep(std::time::Duration::from_millis(50));
-    play_beep(880.0, 200)?;
+    play_beep(config.success_freq2, config.success_duration2)?;
     Ok(())
 }
 
 pub fn play_error() -> Result<(), String> {
-    play_beep(220.0, 300)?;
+    let config = SOUND_CONFIG.lock().unwrap();
+    play_beep(config.error_freq1, config.error_duration1)?;
     thread::sleep(std::time::Duration::from_millis(100));
-    play_beep(110.0, 300)?;
+    play_beep(config.error_freq2, config.error_duration2)?;
     Ok(())
 }
 
 pub fn play_warning() -> Result<(), String> {
-    play_beep(660.0, 150)?;
+    let config = SOUND_CONFIG.lock().unwrap();
+    play_beep(config.warning_freq, config.warning_duration)?;
     thread::sleep(std::time::Duration::from_millis(50));
-    play_beep(660.0, 150)?;
+    play_beep(config.warning_freq, config.warning_duration)?;
     Ok(())
 }
 
-/// Public single-beep helper for use from lib.rs (e.g. SoundType::Beep).
 pub fn play_beep_pub(frequency: f32, duration_ms: u64) -> Result<(), String> {
     play_beep(frequency, duration_ms)
 }
@@ -132,7 +182,6 @@ pub fn play_wav_file<P: AsRef<std::path::Path>>(path: P) -> Result<(), String> {
     Ok(())
 }
 
-/// Convenience: print a green success line and play the success sound.
 pub fn success_message<M: AsRef<str>>(message: M) {
     let colors_enabled = *crate::COLOR_ENABLED.lock().unwrap();
     if colors_enabled {
@@ -143,7 +192,6 @@ pub fn success_message<M: AsRef<str>>(message: M) {
     let _ = play_success();
 }
 
-/// Convenience: print a red error line and play the error sound.
 pub fn error_message<M: AsRef<str>>(message: M) {
     let colors_enabled = *crate::COLOR_ENABLED.lock().unwrap();
     if colors_enabled {
