@@ -1,8 +1,12 @@
 use colored::*;
 use once_cell::sync::Lazy;
+use std::fs;
+use std::io::{self, Write};
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
+use std::path::PathBuf;
+use std::env;
 
 pub mod colors;
 pub mod sound;
@@ -12,6 +16,164 @@ pub use colored::Color;
 
 pub static COLOR_ENABLED: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(true));
 pub static SOUND_ENABLED: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(true));
+
+// ── Config ────────────────────────────────────────────────────────────────────
+
+pub struct Config {
+    pub audio_enabled: bool,
+    pub volume_percent: u32,
+}
+
+impl Config {
+    pub fn default() -> Self {
+        Self {
+            audio_enabled: true,
+            volume_percent: 80,
+        }
+    }
+
+    pub fn to_string(&self) -> String {
+        format!(
+            "audio_enabled = {}\nvolume_percent = {}\n",
+            self.audio_enabled, self.volume_percent
+        )
+    }
+
+    pub fn from_str(s: &str) -> Result<Self, String> {
+        let mut audio_enabled = true;
+        let mut volume_percent = 80;
+        for line in s.lines() {
+            if line.starts_with("audio_enabled") {
+                let val = line.splitn(2, '=').nth(1).unwrap_or("").trim().to_string();
+                audio_enabled = val == "true";
+            } else if line.starts_with("volume_percent") {
+                let val = line.splitn(2, '=').nth(1).unwrap_or("").trim().to_string();
+                if let Ok(v) = val.parse::<u32>() {
+                    volume_percent = v.clamp(0, 100);
+                }
+            }
+        }
+        Ok(Self { audio_enabled, volume_percent })
+    }
+}
+
+// Get the config file path in the project root (same directory as Cargo.toml)
+pub fn get_config_path() -> PathBuf {
+    // Try to find Cargo.toml in current directory or parent directories
+    let mut current = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    
+    loop {
+        let cargo_toml = current.join("Cargo.toml");
+        if cargo_toml.exists() {
+            return current.join("messagio.toml");
+        }
+        
+        // Go up one directory
+        if !current.pop() {
+            break;
+        }
+    }
+    
+    // Fallback to current directory if Cargo.toml not found
+    PathBuf::from("messagio.toml")
+}
+
+pub fn load_config() -> Config {
+    let config_path = get_config_path();
+    
+    match fs::read_to_string(&config_path) {
+        Ok(contents) => {
+            match Config::from_str(&contents) {
+                Ok(config) => {
+                    // Config loaded successfully
+                    config
+                }
+                Err(e) => {
+                    eprintln!("  {} Failed to parse config: {}, using defaults", "⚠".yellow(), e);
+                    Config::default()
+                }
+            }
+        }
+        Err(_) => {
+            // No config file exists, run first-time setup
+            first_run_setup()
+        }
+    }
+}
+
+pub fn save_config(config: &Config) {
+    let config_path = get_config_path();
+    
+    match fs::write(&config_path, config.to_string()) {
+        Ok(_) => {
+            if cfg!(debug_assertions) {
+                println!("  {} Config saved to: {}", "✓".green(), config_path.display());
+            }
+        }
+        Err(e) => {
+            eprintln!("  {} Failed to save config to {}: {}", "⚠".yellow(), config_path.display(), e);
+        }
+    }
+}
+
+pub fn apply_config(config: &Config) {
+    *SOUND_ENABLED.lock().unwrap() = config.audio_enabled;
+    // volume is handled inside sound module via set_volume if needed
+}
+
+fn prompt_bool(prompt: &str) -> bool {
+    loop {
+        print!("{}", prompt);
+        io::stdout().flush().unwrap();
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).unwrap();
+        match input.trim().to_lowercase().as_str() {
+            "y" | "yes" => return true,
+            "n" | "no"  => return false,
+            _           => println!("  Please enter y or n."),
+        }
+    }
+}
+
+fn prompt_volume(prompt: &str) -> u32 {
+    loop {
+        print!("{}", prompt);
+        io::stdout().flush().unwrap();
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).unwrap();
+        match input.trim().parse::<u32>() {
+            Ok(v) if v <= 100 => return v,
+            _                 => println!("  Please enter a number between 0 and 100."),
+        }
+    }
+}
+
+fn first_run_setup() -> Config {
+    let config_path = get_config_path();
+    
+    println!();
+    println!("  {} Welcome to Messagio — first run setup", "🔧".cyan());
+    println!();
+    println!("  Config will be saved to: {}", config_path.display());
+    println!();
+
+    let audio_enabled = prompt_bool("  Enable audio feedback? [y/n]: ");
+    let volume_percent = if audio_enabled {
+        prompt_volume("  Volume (0–100): ")
+    } else {
+        80
+    };
+
+    println!();
+
+    let config = Config { audio_enabled, volume_percent };
+    save_config(&config);
+
+    println!("  {} Preferences saved.", "✓".green());
+    println!();
+
+    config
+}
 
 // ── Color / sound toggles ────────────────────────────────────────────────────
 
@@ -42,7 +204,7 @@ pub enum SoundType {
     Beep,
 }
 
-// ── Standalone sound helpers (used in tests) ─────────────────────────────────
+// ── Standalone sound helpers ──────────────────────────────────────────────────
 
 pub fn play_success_sound() -> Result<(), String> {
     sound::play_success()
@@ -80,7 +242,6 @@ pub fn error<M: AsRef<str>>(msg: M) {
     }
 }
 
-/// Alias matching the demo/tests (`warning` vs `warn`).
 pub fn warning<M: AsRef<str>>(msg: M) {
     warn(msg);
 }
@@ -104,7 +265,6 @@ pub fn info<M: AsRef<str>>(msg: M) {
     }
 }
 
-/// High-visibility critical message (bold red, no sound gate).
 pub fn critical<M: AsRef<str>>(msg: M) {
     if *COLOR_ENABLED.lock().unwrap() {
         println!("{} {}", colors::cross(), msg.as_ref().red().bold().on_black());
@@ -124,7 +284,7 @@ pub fn colored<M: AsRef<str>>(msg: M, color: Color) {
     }
 }
 
-// ── Sound-prefixed aliases (used in demo) ────────────────────────────────────
+// ── Sound-prefixed aliases ────────────────────────────────────────────────────
 
 pub fn sound_success<M: AsRef<str>>(msg: M) {
     success(msg);
@@ -156,8 +316,6 @@ fn spinner_running() -> &'static Mutex<bool> {
     &SPINNER_RUNNING
 }
 
-/// Starts an animated progress spinner with a label.
-/// Call `progress_complete` or `progress_fail` to stop it.
 pub fn progress<M: AsRef<str>>(msg: M) {
     *spinner_running().lock().unwrap() = true;
     let message = msg.as_ref().to_string();
@@ -181,7 +339,7 @@ pub fn progress<M: AsRef<str>>(msg: M) {
 
 pub fn progress_complete<M: AsRef<str>>(msg: M) {
     *spinner_running().lock().unwrap() = false;
-    thread::sleep(Duration::from_millis(120)); // let spinner thread exit
+    thread::sleep(Duration::from_millis(120));
     if *COLOR_ENABLED.lock().unwrap() {
         println!("\r{} {}", colors::check(), msg.as_ref().green());
     } else {
@@ -199,7 +357,6 @@ pub fn progress_fail<M: AsRef<str>>(msg: M) {
     }
 }
 
-/// Convenience wrapper that returns a `SpinnerHandle` for structured start/stop.
 pub fn spinner<M: AsRef<str>>(msg: M) -> SpinnerHandle {
     SpinnerHandle::new(msg)
 }
@@ -263,7 +420,6 @@ impl MessageBuilder {
         self
     }
 
-    /// Request blinking text (rendered as bold when the terminal doesn't support blink).
     pub fn blinking(mut self) -> Self {
         self.blink = true;
         self
@@ -296,16 +452,16 @@ impl MessageBuilder {
         if *SOUND_ENABLED.lock().unwrap() {
             if let Some(s) = self.sound {
                 let _ = match s {
-                    SoundType::Success => sound::play_success(),
-                    SoundType::Error => sound::play_error(),
-                    SoundType::Warning | SoundType::Notification => sound::play_warning(),
-                    SoundType::Beep => sound::play_beep_pub(440.0, 150),
+                    SoundType::Success      => sound::play_success(),
+                    SoundType::Error        => sound::play_error(),
+                    SoundType::Warning
+                    | SoundType::Notification => sound::play_warning(),
+                    SoundType::Beep         => sound::play_beep_pub(440.0, 150),
                 };
             }
         }
     }
 
-    // Legacy compat for the builder-as-struct pattern in lib.rs tests
     pub fn text<S: ToString>(mut self, t: S) -> Self {
         self.text = format!("{} {}", self.text, t.to_string());
         self
@@ -331,7 +487,6 @@ impl Default for MessageBuilder {
 
 // ── Macros ────────────────────────────────────────────────────────────────────
 
-/// `color_println!(Blue, "some {} text", value)`
 #[macro_export]
 macro_rules! color_println {
     ($color:ident, $($arg:tt)*) => {{
@@ -345,7 +500,6 @@ macro_rules! color_println {
     }};
 }
 
-/// `color_print!(Green, "partial ")`  — no newline
 #[macro_export]
 macro_rules! color_print {
     ($color:ident, $($arg:tt)*) => {{
@@ -367,8 +521,6 @@ mod tests {
 
     #[test]
     fn test_message_builder_legacy() {
-        // The original test inside lib.rs used the old API;
-        // keep it working via the new builder.
         let msg = MessageBuilder::new("Hello")
             .colored_text("World", Color::Green)
             .build();
