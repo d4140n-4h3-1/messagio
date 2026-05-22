@@ -1,0 +1,28 @@
+audio_enabled = true
+volume_percent = 50
+sync_color_sound = true
+pulse_with_beeps = true
+
+[success]
+freq1 = 440
+freq2 = 880
+duration1 = 200
+duration2 = 200
+beep_count = 4
+
+[error]
+freq1 = 220
+freq2 = 110
+duration1 = 300
+duration2 = 300
+beep_count = 4
+
+[warning]
+freq = 660
+duration = 150
+beep_count = 4
+
+[beep]
+freq = 440
+duration = 150
+beep_count = 1

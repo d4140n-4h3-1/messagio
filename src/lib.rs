@@ -19,8 +19,12 @@ pub static SOUND_ENABLED: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(true));
 pub static SYNC_COLOR_SOUND: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
 pub static PULSE_ENABLED: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(true));
 
+// Cached config so we don't hit the filesystem on every message call.
+static CACHED_CONFIG: Lazy<Mutex<Config>> = Lazy::new(|| Mutex::new(Config::default()));
+
 // ── Config ────────────────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone)]
 pub struct Config {
     pub audio_enabled: bool,
     pub volume_percent: u32,
@@ -44,8 +48,8 @@ pub struct Config {
     pub beep_count: usize,
 }
 
-impl Config {
-    pub fn default() -> Self {
+impl Default for Config {
+    fn default() -> Self {
         Self {
             audio_enabled: true,
             volume_percent: 80,
@@ -69,8 +73,11 @@ impl Config {
             beep_count: 1,
         }
     }
+}
 
-    pub fn to_string(&self) -> String {
+impl Config {
+    /// Serialize to TOML-compatible string.
+    pub fn to_toml(&self) -> String {
         format!(
             "audio_enabled = {}\n\
              volume_percent = {}\n\
@@ -100,98 +107,85 @@ impl Config {
              freq = {}\n\
              duration = {}\n\
              beep_count = {}\n",
-            self.audio_enabled,
-            self.volume_percent,
-            self.sync_color_sound,
-            self.pulse_with_beeps,
-            self.success_freq1,
-            self.success_freq2,
-            self.success_duration1,
-            self.success_duration2,
-            self.success_beep_count,
-            self.error_freq1,
-            self.error_freq2,
-            self.error_duration1,
-            self.error_duration2,
-            self.error_beep_count,
-            self.warning_freq,
-            self.warning_duration,
-            self.warning_beep_count,
-            self.beep_freq,
-            self.beep_duration,
-            self.beep_count,
+            self.audio_enabled, self.volume_percent, self.sync_color_sound, self.pulse_with_beeps,
+            self.success_freq1, self.success_freq2, self.success_duration1, self.success_duration2, self.success_beep_count,
+            self.error_freq1, self.error_freq2, self.error_duration1, self.error_duration2, self.error_beep_count,
+            self.warning_freq, self.warning_duration, self.warning_beep_count,
+            self.beep_freq, self.beep_duration, self.beep_count,
         )
     }
 
+    /// Parse from a TOML-compatible string.
+    /// Keys are scoped to their `[section]` headers so identically-named
+    /// keys in different sections (e.g. `beep_count`, `freq`) don't collide.
     pub fn from_str(s: &str) -> Result<Self, String> {
         let mut config = Config::default();
-        
+        let mut section = "";
+
         for line in s.lines() {
             let line = line.trim();
-            if line.is_empty() || line.starts_with('[') {
+            if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            
-            if let Some((key, value)) = line.split_once('=') {
-                let key = key.trim();
-                let value = value.trim();
-                
+
+            // Section header
+            if line.starts_with('[') {
+                section = match line.trim_matches(|c| c == '[' || c == ']') {
+                    "success" => "success",
+                    "error"   => "error",
+                    "warning" => "warning",
+                    "beep"    => "beep",
+                    _         => "",
+                };
+                continue;
+            }
+
+            let Some((key, value)) = line.split_once('=') else { continue };
+            let key   = key.trim();
+            let value = value.trim();
+
+            // Top-level keys (no section)
+            if section.is_empty() {
                 match key {
-                    "audio_enabled" => config.audio_enabled = value == "true",
-                    "volume_percent" => {
+                    "audio_enabled"    => config.audio_enabled    = value == "true",
+                    "sync_color_sound" => config.sync_color_sound = value == "true",
+                    "pulse_with_beeps" => config.pulse_with_beeps = value == "true",
+                    "volume_percent"   => {
                         if let Ok(v) = value.parse::<u32>() {
                             config.volume_percent = v.clamp(0, 100);
                         }
                     }
-                    "sync_color_sound" => config.sync_color_sound = value == "true",
-                    "pulse_with_beeps" => config.pulse_with_beeps = value == "true",
-                    "freq1" => {
-                        if let Ok(v) = value.parse::<f32>() {
-                            config.success_freq1 = v;
-                        }
-                    }
-                    "freq2" => {
-                        if let Ok(v) = value.parse::<f32>() {
-                            config.success_freq2 = v;
-                        }
-                    }
-                    "duration1" => {
-                        if let Ok(v) = value.parse::<u64>() {
-                            config.success_duration1 = v;
-                        }
-                    }
-                    "duration2" => {
-                        if let Ok(v) = value.parse::<u64>() {
-                            config.success_duration2 = v;
-                        }
-                    }
-                    "beep_count" => {
-                        if let Ok(v) = value.parse::<usize>() {
-                            config.success_beep_count = v;
-                            config.error_beep_count = v;
-                            config.warning_beep_count = v;
-                            config.beep_count = v;
-                        }
-                    }
-                    "freq" => {
-                        if let Ok(v) = value.parse::<f32>() {
-                            config.warning_freq = v;
-                            config.beep_freq = v;
-                            config.error_freq1 = v;
-                        }
-                    }
-                    "duration" => {
-                        if let Ok(v) = value.parse::<u64>() {
-                            config.warning_duration = v;
-                            config.beep_duration = v;
-                            config.error_duration1 = v;
-                        }
-                    }
                     _ => {}
                 }
+                continue;
+            }
+
+            // Section-scoped keys
+            match (section, key) {
+                ("success", "freq1")      => { if let Ok(v) = value.parse() { config.success_freq1      = v; } }
+                ("success", "freq2")      => { if let Ok(v) = value.parse() { config.success_freq2      = v; } }
+                ("success", "duration1")  => { if let Ok(v) = value.parse() { config.success_duration1  = v; } }
+                ("success", "duration2")  => { if let Ok(v) = value.parse() { config.success_duration2  = v; } }
+                ("success", "beep_count") => { if let Ok(v) = value.parse() { config.success_beep_count = v; } }
+
+                ("error", "freq1")        => { if let Ok(v) = value.parse() { config.error_freq1      = v; } }
+                ("error", "freq2")        => { if let Ok(v) = value.parse() { config.error_freq2      = v; } }
+                ("error", "duration1")    => { if let Ok(v) = value.parse() { config.error_duration1  = v; } }
+                ("error", "duration2")    => { if let Ok(v) = value.parse() { config.error_duration2  = v; } }
+                ("error", "beep_count")   => { if let Ok(v) = value.parse() { config.error_beep_count = v; } }
+
+                ("warning", "freq")       => { if let Ok(v) = value.parse() { config.warning_freq         = v; } }
+                ("warning", "duration")   => { if let Ok(v) = value.parse() { config.warning_duration     = v; } }
+                ("warning", "beep_count") => { if let Ok(v) = value.parse() { config.warning_beep_count   = v; } }
+
+                ("beep", "freq")          => { if let Ok(v) = value.parse() { config.beep_freq     = v; } }
+                ("beep", "duration")      => { if let Ok(v) = value.parse() { config.beep_duration = v; } }
+                ("beep", "beep_count")    => { if let Ok(v) = value.parse() { config.beep_count    = v; } }
+
+                _ => {}
             }
         }
-        
+
         Ok(config)
     }
 }
@@ -199,42 +193,38 @@ impl Config {
 // Get the config file path in the project root (same directory as Cargo.toml)
 pub fn get_config_path() -> PathBuf {
     let mut current = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    
+
     loop {
-        let cargo_toml = current.join("Cargo.toml");
-        if cargo_toml.exists() {
+        if current.join("Cargo.toml").exists() {
             return current.join("messagio.toml");
         }
-        
         if !current.pop() {
             break;
         }
     }
-    
+
     PathBuf::from("messagio.toml")
 }
 
 pub fn load_config() -> Config {
     let config_path = get_config_path();
-    
+
     match fs::read_to_string(&config_path) {
-        Ok(contents) => {
-            match Config::from_str(&contents) {
-                Ok(config) => config,
-                Err(e) => {
-                    eprintln!("  {} Failed to parse config: {}, using defaults", "⚠".yellow(), e);
-                    Config::default()
-                }
+        Ok(contents) => match Config::from_str(&contents) {
+            Ok(config) => config,
+            Err(e) => {
+                eprintln!("  {} Failed to parse config: {}, using defaults", "⚠".yellow(), e);
+                Config::default()
             }
-        }
+        },
         Err(_) => first_run_setup(),
     }
 }
 
 pub fn save_config(config: &Config) {
     let config_path = get_config_path();
-    
-    match fs::write(&config_path, config.to_string()) {
+
+    match fs::write(&config_path, config.to_toml()) {
         Ok(_) => {
             if cfg!(debug_assertions) {
                 println!("  {} Config saved to: {}", "✓".green(), config_path.display());
@@ -247,16 +237,25 @@ pub fn save_config(config: &Config) {
 }
 
 pub fn apply_config(config: &Config) {
-    *SOUND_ENABLED.lock().unwrap() = config.audio_enabled;
+    *SOUND_ENABLED.lock().unwrap()    = config.audio_enabled;
     *SYNC_COLOR_SOUND.lock().unwrap() = config.sync_color_sound;
-    *PULSE_ENABLED.lock().unwrap() = config.pulse_with_beeps;
-    
+    *PULSE_ENABLED.lock().unwrap()    = config.pulse_with_beeps;
+
+    // Update the in-memory cache so per-message calls don't touch the filesystem.
+    *CACHED_CONFIG.lock().unwrap() = config.clone();
+
     sound::configure_sounds(config);
-    
+
     if config.sync_color_sound {
         let sound_state = *SOUND_ENABLED.lock().unwrap();
         *COLOR_ENABLED.lock().unwrap() = sound_state;
     }
+}
+
+/// Returns a clone of the cached config.  Avoids filesystem I/O on every
+/// message call once `apply_config` has been called.
+fn get_config() -> Config {
+    CACHED_CONFIG.lock().unwrap().clone()
 }
 
 fn prompt_bool(prompt: &str) -> bool {
@@ -268,7 +267,7 @@ fn prompt_bool(prompt: &str) -> bool {
         match input.trim().to_lowercase().as_str() {
             "y" | "yes" => return true,
             "n" | "no"  => return false,
-            _           => println!("  Please enter y or n."),
+            _            => println!("  Please enter y or n."),
         }
     }
 }
@@ -281,7 +280,7 @@ fn prompt_volume(prompt: &str) -> u32 {
         io::stdin().read_line(&mut input).unwrap();
         match input.trim().parse::<u32>() {
             Ok(v) if v <= 100 => return v,
-            _                 => println!("  Please enter a number between 0 and 100."),
+            _                  => println!("  Please enter a number between 0 and 100."),
         }
     }
 }
@@ -301,38 +300,31 @@ fn prompt_usize(prompt: &str) -> usize {
 
 fn first_run_setup() -> Config {
     let config_path = get_config_path();
-    
+
     println!();
     println!("  {} Welcome to Messagio — first run setup", "🔧".cyan());
     println!();
     println!("  Config will be saved to: {}", config_path.display());
     println!();
 
-    let audio_enabled = prompt_bool("  Enable audio feedback? [y/n]: ");
-    let volume_percent = if audio_enabled {
-        prompt_volume("  Volume (0–100): ")
-    } else {
-        80
-    };
-    
+    let audio_enabled  = prompt_bool("  Enable audio feedback? [y/n]: ");
+    let volume_percent = if audio_enabled { prompt_volume("  Volume (0–100): ") } else { 80 };
     let sync_color_sound = if audio_enabled {
         prompt_bool("  Sync colors with sound? [y/n]: ")
     } else {
         false
     };
-    
     let pulse_with_beeps = prompt_bool("  Make text pulse (normal->bold) with each beep? [y/n]: ");
-    
+
     println!();
     println!("  Now configure beep counts (1-10 beeps per sound type):");
     let success_beep_count = prompt_usize("  Success beep count: ");
-    let error_beep_count = prompt_usize("  Error beep count: ");
+    let error_beep_count   = prompt_usize("  Error beep count: ");
     let warning_beep_count = prompt_usize("  Warning beep count: ");
-
     println!();
 
-    let config = Config { 
-        audio_enabled, 
+    let config = Config {
+        audio_enabled,
         volume_percent,
         sync_color_sound,
         pulse_with_beeps,
@@ -352,24 +344,23 @@ fn first_run_setup() -> Config {
 // ── Helper functions for pulse ────────────────────────────────────────────────
 
 fn get_beep_count(sound_type: Option<SoundType>) -> usize {
-    let config = load_config();
+    let config = get_config();
     match sound_type {
-        Some(SoundType::Success) => config.success_beep_count,
-        Some(SoundType::Error) => config.error_beep_count,
-        Some(SoundType::Warning) => config.warning_beep_count,
+        Some(SoundType::Success)      => config.success_beep_count,
+        Some(SoundType::Error)        => config.error_beep_count,
+        Some(SoundType::Warning)      => config.warning_beep_count,
         Some(SoundType::Notification) => config.warning_beep_count,
-        Some(SoundType::Beep) => config.beep_count,
-        None => 0,
+        Some(SoundType::Beep)         => config.beep_count,
+        None                          => 0,
     }
 }
 
-// Apply bold formatting to text
 fn make_bold(text: &str) -> String {
     format!("\x1b[1m{}\x1b[0m", text)
 }
 
-// Synchronized pulse and beep - plays all beeps while text is bold
-fn synchronized_message<F>(text: &str, beep_count: usize, duration_per_beep: u64, sound_func: F, _is_colored: bool)
+/// Print a message, optionally pulsing bold and playing a sound.
+fn synchronized_message<F>(text: &str, beep_count: usize, sound_func: F)
 where
     F: FnOnce() -> Result<(), String>,
 {
@@ -377,22 +368,13 @@ where
         println!("{}", text);
         return;
     }
-    
-    let should_pulse = *PULSE_ENABLED.lock().unwrap();
-    let original_text = text.to_string();
-    let bold_text = make_bold(&original_text);
-    
-    if should_pulse {
-        // Show bold text before any beeps
-        print!("\r\x1b[K{}", bold_text);
+
+    if *PULSE_ENABLED.lock().unwrap() {
+        print!("\r\x1b[K{}", make_bold(text));
         io::stdout().flush().unwrap();
-        
-        // Play all sounds (this will play multiple beeps)
         if *SOUND_ENABLED.lock().unwrap() {
             let _ = sound_func();
         }
-        
-        // Keep bold at the end
         println!();
     } else {
         println!("{}", text);
@@ -412,51 +394,31 @@ pub fn sync_color_with_sound(enable: bool) {
     }
 }
 
-pub fn enable_all() {
-    enable_colors();
-    enable_sound();
-}
-
-pub fn disable_all() {
-    disable_colors();
-    disable_sound();
-}
+pub fn enable_all()     { enable_colors();  enable_sound();  }
+pub fn disable_all()    { disable_colors(); disable_sound(); }
 
 pub fn enable_colors() {
     *COLOR_ENABLED.lock().unwrap() = true;
-    if *SYNC_COLOR_SOUND.lock().unwrap() {
-        *SOUND_ENABLED.lock().unwrap() = true;
-    }
+    if *SYNC_COLOR_SOUND.lock().unwrap() { *SOUND_ENABLED.lock().unwrap() = true; }
 }
 
 pub fn disable_colors() {
     *COLOR_ENABLED.lock().unwrap() = false;
-    if *SYNC_COLOR_SOUND.lock().unwrap() {
-        *SOUND_ENABLED.lock().unwrap() = false;
-    }
+    if *SYNC_COLOR_SOUND.lock().unwrap() { *SOUND_ENABLED.lock().unwrap() = false; }
 }
 
 pub fn enable_sound() {
     *SOUND_ENABLED.lock().unwrap() = true;
-    if *SYNC_COLOR_SOUND.lock().unwrap() {
-        *COLOR_ENABLED.lock().unwrap() = true;
-    }
+    if *SYNC_COLOR_SOUND.lock().unwrap() { *COLOR_ENABLED.lock().unwrap() = true; }
 }
 
 pub fn disable_sound() {
     *SOUND_ENABLED.lock().unwrap() = false;
-    if *SYNC_COLOR_SOUND.lock().unwrap() {
-        *COLOR_ENABLED.lock().unwrap() = false;
-    }
+    if *SYNC_COLOR_SOUND.lock().unwrap() { *COLOR_ENABLED.lock().unwrap() = false; }
 }
 
-pub fn enable_pulse() {
-    *PULSE_ENABLED.lock().unwrap() = true;
-}
-
-pub fn disable_pulse() {
-    *PULSE_ENABLED.lock().unwrap() = false;
-}
+pub fn enable_pulse()  { *PULSE_ENABLED.lock().unwrap() = true;  }
+pub fn disable_pulse() { *PULSE_ENABLED.lock().unwrap() = false; }
 
 // ── Sound type enum ──────────────────────────────────────────────────────────
 
@@ -471,110 +433,72 @@ pub enum SoundType {
 
 // ── Standalone sound helpers ──────────────────────────────────────────────────
 
-pub fn play_success_sound() -> Result<(), String> {
-    sound::play_success()
-}
-
-pub fn play_error_sound() -> Result<(), String> {
-    sound::play_error()
-}
-
-pub fn play_warning_sound() -> Result<(), String> {
-    sound::play_warning()
-}
+pub fn play_success_sound() -> Result<(), String> { sound::play_success() }
+pub fn play_error_sound()   -> Result<(), String> { sound::play_error()   }
+pub fn play_warning_sound() -> Result<(), String> { sound::play_warning() }
 
 // ── Core message functions ───────────────────────────────────────────────────
 
 pub fn success<M: AsRef<str>>(msg: M) {
-    let msg_str = msg.as_ref();
-    let config = load_config();
+    let config     = get_config();
     let beep_count = config.success_beep_count;
-    let duration_per_beep = config.success_duration1;
     let is_colored = *COLOR_ENABLED.lock().unwrap();
-    
     let text = if is_colored {
-        format!("{} {}", colors::check(), msg_str.green())
+        format!("{} {}", colors::check(), msg.as_ref().green())
     } else {
-        format!("[✓] {}", msg_str)
+        format!("[✓] {}", msg.as_ref())
     };
-    
-    synchronized_message(&text, beep_count, duration_per_beep, || {
-        sound::play_success()
-    }, is_colored);
+    synchronized_message(&text, beep_count, || sound::play_success());
 }
 
 pub fn error<M: AsRef<str>>(msg: M) {
-    let msg_str = msg.as_ref();
-    let config = load_config();
+    let config     = get_config();
     let beep_count = config.error_beep_count;
-    let duration_per_beep = config.error_duration1;
     let is_colored = *COLOR_ENABLED.lock().unwrap();
-    
     let text = if is_colored {
-        format!("{} {}", colors::cross(), msg_str.red().bold())
+        format!("{} {}", colors::cross(), msg.as_ref().red().bold())
     } else {
-        format!("[✗] {}", msg_str)
+        format!("[✗] {}", msg.as_ref())
     };
-    
-    synchronized_message(&text, beep_count, duration_per_beep, || {
-        sound::play_error()
-    }, is_colored);
+    synchronized_message(&text, beep_count, || sound::play_error());
 }
 
-pub fn warning<M: AsRef<str>>(msg: M) {
-    warn(msg);
-}
+/// Alias for [`warn`].
+pub fn warning<M: AsRef<str>>(msg: M) { warn(msg); }
 
 pub fn warn<M: AsRef<str>>(msg: M) {
-    let msg_str = msg.as_ref();
-    let config = load_config();
+    let config     = get_config();
     let beep_count = config.warning_beep_count;
-    let duration_per_beep = config.warning_duration;
     let is_colored = *COLOR_ENABLED.lock().unwrap();
-    
     let text = if is_colored {
-        format!("{} {}", colors::warn(), msg_str.yellow())
+        format!("{} {}", colors::warn(), msg.as_ref().yellow())
     } else {
-        format!("[⚠] {}", msg_str)
+        format!("[⚠] {}", msg.as_ref())
     };
-    
-    synchronized_message(&text, beep_count, duration_per_beep, || {
-        sound::play_warning()
-    }, is_colored);
+    synchronized_message(&text, beep_count, || sound::play_warning());
 }
 
 pub fn info<M: AsRef<str>>(msg: M) {
-    let msg_str = msg.as_ref();
-    let beep_count = 0;
     let is_colored = *COLOR_ENABLED.lock().unwrap();
-    
     let text = if is_colored {
-        format!("{} {}", colors::info(), msg_str.blue())
+        format!("{} {}", colors::info(), msg.as_ref().blue())
     } else {
-        format!("[i] {}", msg_str)
+        format!("[i] {}", msg.as_ref())
     };
-    
-    synchronized_message(&text, beep_count, 0, || {
-        Ok(())
-    }, is_colored);
+    // info has no sound — beep_count 0 skips the sound path entirely
+    synchronized_message(&text, 0, || Ok(()));
 }
 
 pub fn critical<M: AsRef<str>>(msg: M) {
-    let msg_str = msg.as_ref();
-    let config = load_config();
+    let config     = get_config();
     let beep_count = config.error_beep_count;
-    let duration_per_beep = config.error_duration1;
     let is_colored = *COLOR_ENABLED.lock().unwrap();
-    
     let text = if is_colored {
-        format!("{} {}", colors::cross(), msg_str.red().bold().on_black())
+        format!("{} {}", colors::cross(), msg.as_ref().red().bold().on_black())
     } else {
-        format!("[✗] CRITICAL: {}", msg_str)
+        format!("[✗] CRITICAL: {}", msg.as_ref())
     };
-    
-    synchronized_message(&text, beep_count, duration_per_beep, || {
-        sound::play_error()
-    }, is_colored);
+    synchronized_message(&text, beep_count, || sound::play_error());
 }
 
 pub fn colored<M: AsRef<str>>(msg: M, color: Color) {
@@ -587,45 +511,32 @@ pub fn colored<M: AsRef<str>>(msg: M, color: Color) {
 
 // ── Sound-prefixed aliases ────────────────────────────────────────────────────
 
-pub fn sound_success<M: AsRef<str>>(msg: M) {
-    success(msg);
-}
+/// Alias for [`success`] — prints and plays the success sound.
+pub fn sound_success<M: AsRef<str>>(msg: M) { success(msg); }
 
-pub fn sound_error<M: AsRef<str>>(msg: M) {
-    error(msg);
-}
+/// Alias for [`error`] — prints and plays the error sound.
+pub fn sound_error<M: AsRef<str>>(msg: M) { error(msg); }
 
 // ── Status indicator strings ─────────────────────────────────────────────────
 
-pub fn status_valid() -> String {
-    colors::valid_prefix()
-}
-
-pub fn status_warn() -> String {
-    colors::warn_prefix()
-}
-
-pub fn status_error() -> String {
-    colors::error_prefix()
-}
+pub fn status_valid() -> String { colors::valid_prefix() }
+pub fn status_warn()  -> String { colors::warn_prefix()  }
+pub fn status_error() -> String { colors::error_prefix() }
 
 // ── Progress / spinner ────────────────────────────────────────────────────────
 
-static SPINNER_RUNNING: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
-
-fn spinner_running() -> &'static Mutex<bool> {
-    &SPINNER_RUNNING
-}
+/// Global running flag used only by the standalone `progress` / `progress_complete` helpers.
+static GLOBAL_SPINNER_RUNNING: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
 
 pub fn progress<M: AsRef<str>>(msg: M) {
-    *spinner_running().lock().unwrap() = true;
+    *GLOBAL_SPINNER_RUNNING.lock().unwrap() = true;
     let message = msg.as_ref().to_string();
     let colors_enabled = *COLOR_ENABLED.lock().unwrap();
 
     thread::spawn(move || {
         let frames = ["◐", "◓", "◑", "◒"];
         let mut i = 0;
-        while *spinner_running().lock().unwrap() {
+        while *GLOBAL_SPINNER_RUNNING.lock().unwrap() {
             if colors_enabled {
                 print!("\r{} {}", frames[i].cyan(), message);
             } else {
@@ -639,7 +550,7 @@ pub fn progress<M: AsRef<str>>(msg: M) {
 }
 
 pub fn progress_complete<M: AsRef<str>>(msg: M) {
-    *spinner_running().lock().unwrap() = false;
+    *GLOBAL_SPINNER_RUNNING.lock().unwrap() = false;
     thread::sleep(Duration::from_millis(120));
     if *COLOR_ENABLED.lock().unwrap() {
         println!("\r{} {}", colors::check(), msg.as_ref().green());
@@ -649,7 +560,7 @@ pub fn progress_complete<M: AsRef<str>>(msg: M) {
 }
 
 pub fn progress_fail<M: AsRef<str>>(msg: M) {
-    *spinner_running().lock().unwrap() = false;
+    *GLOBAL_SPINNER_RUNNING.lock().unwrap() = false;
     thread::sleep(Duration::from_millis(120));
     if *COLOR_ENABLED.lock().unwrap() {
         println!("\r{} {}", colors::cross(), msg.as_ref().red());
@@ -662,22 +573,55 @@ pub fn spinner<M: AsRef<str>>(msg: M) -> SpinnerHandle {
     SpinnerHandle::new(msg)
 }
 
+/// A spinner handle with its own per-instance running flag, so multiple
+/// concurrent spinners don't interfere with each other.
 pub struct SpinnerHandle {
-    _message: String,
+    running: std::sync::Arc<Mutex<bool>>,
 }
 
 impl SpinnerHandle {
     fn new<M: AsRef<str>>(msg: M) -> Self {
-        progress(msg.as_ref());
-        SpinnerHandle { _message: msg.as_ref().to_string() }
+        let running       = std::sync::Arc::new(Mutex::new(true));
+        let running_clone = running.clone();
+        let message       = msg.as_ref().to_string();
+        let colors_enabled = *COLOR_ENABLED.lock().unwrap();
+
+        thread::spawn(move || {
+            let frames = ["◐", "◓", "◑", "◒"];
+            let mut i = 0;
+            while *running_clone.lock().unwrap() {
+                if colors_enabled {
+                    print!("\r{} {}", frames[i].cyan(), message);
+                } else {
+                    print!("\r{} {}", frames[i], message);
+                }
+                std::io::Write::flush(&mut std::io::stdout()).unwrap();
+                thread::sleep(Duration::from_millis(100));
+                i = (i + 1) % frames.len();
+            }
+        });
+
+        SpinnerHandle { running }
     }
 
     pub fn finish_success<M: AsRef<str>>(&self, msg: M) {
-        progress_complete(msg);
+        *self.running.lock().unwrap() = false;
+        thread::sleep(Duration::from_millis(120));
+        if *COLOR_ENABLED.lock().unwrap() {
+            println!("\r{} {}", colors::check(), msg.as_ref().green());
+        } else {
+            println!("\r[✓] {}", msg.as_ref());
+        }
     }
 
     pub fn finish_error<M: AsRef<str>>(&self, msg: M) {
-        progress_fail(msg);
+        *self.running.lock().unwrap() = false;
+        thread::sleep(Duration::from_millis(120));
+        if *COLOR_ENABLED.lock().unwrap() {
+            println!("\r{} {}", colors::cross(), msg.as_ref().red());
+        } else {
+            println!("\r[✗] {}", msg.as_ref());
+        }
     }
 }
 
@@ -706,25 +650,17 @@ impl MessageBuilder {
         }
     }
 
-    pub fn color(mut self, c: Color) -> Self {
-        self.color = Some(c);
-        self
-    }
+    pub fn color(mut self, c: Color) -> Self { self.color = Some(c); self }
 
     pub fn with_symbol<S: AsRef<str>>(mut self, sym: S) -> Self {
         self.symbol = Some(sym.as_ref().to_string());
         self
     }
 
-    pub fn with_sound(mut self, s: SoundType) -> Self {
-        self.sound = Some(s);
-        self
-    }
+    pub fn with_sound(mut self, s: SoundType) -> Self { self.sound = Some(s); self }
 
-    pub fn blinking(mut self) -> Self {
-        self.force_pulse = true;
-        self
-    }
+    /// Force the text to pulse bold even on single-beep sounds.
+    pub fn blinking(mut self) -> Self { self.force_pulse = true; self }
 
     pub fn build(&self) -> String {
         let colors_enabled = *COLOR_ENABLED.lock().unwrap();
@@ -744,43 +680,31 @@ impl MessageBuilder {
     }
 
     pub fn send(&self) {
-        let beep_count = get_beep_count(self.sound);
+        let beep_count   = get_beep_count(self.sound);
         let should_pulse = self.force_pulse || (beep_count > 0 && *PULSE_ENABLED.lock().unwrap());
-        let output = self.build();
-        
-        // Get sound function based on sound type
+        let output       = self.build();
+
         let sound_func: Box<dyn FnOnce() -> Result<(), String>> = match self.sound {
             Some(SoundType::Success) => Box::new(|| sound::play_success()),
-            Some(SoundType::Error) => Box::new(|| sound::play_error()),
+            Some(SoundType::Error)   => Box::new(|| sound::play_error()),
             Some(SoundType::Warning) | Some(SoundType::Notification) => Box::new(|| sound::play_warning()),
             Some(SoundType::Beep) => {
-                let config = load_config();
-                let freq = config.beep_freq;
+                let config   = get_config();
+                let freq     = config.beep_freq;
                 let duration = config.beep_duration;
                 Box::new(move || sound::play_beep_pub(freq, duration))
             }
             None => Box::new(|| Ok(())),
         };
-        
+
         if should_pulse && beep_count > 0 {
-            let bold_text = make_bold(&output);
-            
-            // Show bold text
-            print!("\r\x1b[K{}", bold_text);
+            print!("\r\x1b[K{}", make_bold(&output));
             io::stdout().flush().unwrap();
-            
-            // Play all sounds (this will play multiple beeps)
-            if *SOUND_ENABLED.lock().unwrap() {
-                let _ = sound_func();
-            }
-            
+            if *SOUND_ENABLED.lock().unwrap() { let _ = sound_func(); }
             println!();
         } else {
-            // Just print without pulsing
             println!("{}", output);
-            if *SOUND_ENABLED.lock().unwrap() {
-                let _ = sound_func();
-            }
+            if *SOUND_ENABLED.lock().unwrap() { let _ = sound_func(); }
         }
     }
 
@@ -802,9 +726,7 @@ impl MessageBuilder {
 }
 
 impl Default for MessageBuilder {
-    fn default() -> Self {
-        Self::new("")
-    }
+    fn default() -> Self { Self::new("") }
 }
 
 // ── Macros ────────────────────────────────────────────────────────────────────
@@ -852,12 +774,12 @@ mod tests {
 
     #[test]
     fn test_builder_chaining() {
-        let b = message("Test").color(Color::Red).with_symbol("!").with_sound(SoundType::Beep);
+        let b   = message("Test").color(Color::Red).with_symbol("!").with_sound(SoundType::Beep);
         let out = b.build();
         assert!(out.contains("Test"));
         assert!(out.contains("!"));
     }
-    
+
     #[test]
     fn test_config_default() {
         let config = Config::default();
@@ -866,7 +788,66 @@ mod tests {
         assert!(!config.sync_color_sound);
         assert!(config.pulse_with_beeps);
         assert_eq!(config.success_beep_count, 2);
-        assert_eq!(config.error_beep_count, 2);
+        assert_eq!(config.error_beep_count,   2);
         assert_eq!(config.warning_beep_count, 2);
+    }
+
+    #[test]
+    fn test_config_roundtrip() {
+        let original = Config::default();
+        let parsed   = Config::from_str(&original.to_toml()).expect("parse failed");
+
+        assert_eq!(parsed.audio_enabled,       original.audio_enabled);
+        assert_eq!(parsed.success_beep_count,  original.success_beep_count);
+        assert_eq!(parsed.error_beep_count,    original.error_beep_count);
+        assert_eq!(parsed.warning_beep_count,  original.warning_beep_count);
+        assert_eq!(parsed.beep_count,          original.beep_count);
+        assert!((parsed.success_freq1 - original.success_freq1).abs() < 0.01);
+        assert!((parsed.error_freq1   - original.error_freq1  ).abs() < 0.01);
+        assert!((parsed.warning_freq  - original.warning_freq ).abs() < 0.01);
+        assert!((parsed.beep_freq     - original.beep_freq    ).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_config_section_isolation() {
+        // Verifies that beep_count in [error] doesn't clobber [success], etc.
+        let toml = "\
+audio_enabled = true
+volume_percent = 80
+sync_color_sound = false
+pulse_with_beeps = true
+
+[success]
+freq1 = 440
+freq2 = 880
+duration1 = 200
+duration2 = 200
+beep_count = 2
+
+[error]
+freq1 = 220
+freq2 = 110
+duration1 = 300
+duration2 = 300
+beep_count = 4
+
+[warning]
+freq = 660
+duration = 150
+beep_count = 3
+
+[beep]
+freq = 440
+duration = 150
+beep_count = 1
+";
+        let cfg = Config::from_str(toml).unwrap();
+        assert_eq!(cfg.success_beep_count, 2);
+        assert_eq!(cfg.error_beep_count,   4);
+        assert_eq!(cfg.warning_beep_count, 3);
+        assert_eq!(cfg.beep_count,         1);
+        assert!((cfg.success_freq1 - 440.0).abs() < 0.01);
+        assert!((cfg.error_freq1   - 220.0).abs() < 0.01);
+        assert!((cfg.warning_freq  - 660.0).abs() < 0.01);
     }
 }

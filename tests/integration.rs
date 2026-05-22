@@ -14,7 +14,7 @@ fn test_builder() {
         .color(Color::Red)
         .with_symbol("!")
         .with_sound(SoundType::Beep);
-    
+
     builder.send();
 }
 
@@ -26,28 +26,28 @@ fn test_sound_types() {
 }
 
 #[test]
-fn test_blink_feature() {
-    enable_blink();
-    assert!(*BLINK_ENABLED.lock().unwrap());
-    
-    disable_blink();
-    assert!(!*BLINK_ENABLED.lock().unwrap());
-    
-    enable_blink();
+fn test_pulse_feature() {
+    enable_pulse();
+    assert!(*PULSE_ENABLED.lock().unwrap());
+
+    disable_pulse();
+    assert!(!*PULSE_ENABLED.lock().unwrap());
+
+    enable_pulse();
 }
 
 #[test]
 fn test_sync_feature() {
     sync_color_with_sound(true);
     assert!(*SYNC_COLOR_SOUND.lock().unwrap());
-    
+
     disable_sound();
     assert!(!*SOUND_ENABLED.lock().unwrap());
     assert!(!*COLOR_ENABLED.lock().unwrap());
-    
+
     enable_colors();
     assert!(*SOUND_ENABLED.lock().unwrap());
     assert!(*COLOR_ENABLED.lock().unwrap());
-    
+
     sync_color_with_sound(false);
 }
