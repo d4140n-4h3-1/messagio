@@ -2,33 +2,33 @@ use colored::*;
 
 pub fn check() -> String {
     if *crate::COLOR_ENABLED.lock().unwrap() {
-        format!("[{}]", "✓".green().bold())
+        format!("[{}]", " OK ".green().bold())
     } else {
-        "[✓]".to_string()
+        "[ OK ]".to_string()
     }
 }
 
 pub fn cross() -> String {
     if *crate::COLOR_ENABLED.lock().unwrap() {
-        format!("[{}]", "✗".red().bold())
+        format!("[{}]", "FAIL".red().bold())
     } else {
-        "[✗]".to_string()
+        "[FAIL]".to_string()
     }
 }
 
 pub fn warn() -> String {
     if *crate::COLOR_ENABLED.lock().unwrap() {
-        format!("[{}]", "⚠".yellow().bold())
+        format!("[{}]", "WARN".yellow().bold())
     } else {
-        "[⚠]".to_string()
+        "[WARN]".to_string()
     }
 }
 
 pub fn info() -> String {
     if *crate::COLOR_ENABLED.lock().unwrap() {
-        format!("[{}]", "i".blue().bold())
+        format!("[{}]", "INFO".cyan().bold())
     } else {
-        "[i]".to_string()
+        "[INFO]".to_string()
     }
 }
 
@@ -55,6 +55,10 @@ pub fn error_prefix() -> String {
         "  [✗] ERROR".to_string()
     }
 }
+
+pub fn status_valid() -> String { valid_prefix() }
+pub fn status_warn() -> String { warn_prefix() }
+pub fn status_error() -> String { error_prefix() }
 
 pub fn colorize<S: AsRef<str>>(text: S, color: Color) -> String {
     if *crate::COLOR_ENABLED.lock().unwrap() {

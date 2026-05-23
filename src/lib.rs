@@ -19,6 +19,11 @@ pub static SOUND_ENABLED: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(true));
 pub static SYNC_COLOR_SOUND: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
 pub static PULSE_ENABLED: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(true));
 
+// Speed settings
+static PULSE_SPEED_MS: Lazy<Mutex<u64>> = Lazy::new(|| Mutex::new(300));
+static BEEP_INTERVAL_MS: Lazy<Mutex<u64>> = Lazy::new(|| Mutex::new(50));
+static SPINNER_SPEED_MS: Lazy<Mutex<u64>> = Lazy::new(|| Mutex::new(100));
+
 // Cached config so we don't hit the filesystem on every message call.
 static CACHED_CONFIG: Lazy<Mutex<Config>> = Lazy::new(|| Mutex::new(Config::default()));
 
@@ -30,6 +35,11 @@ pub struct Config {
     pub volume_percent: u32,
     pub sync_color_sound: bool,
     pub pulse_with_beeps: bool,
+    // Speed settings
+    pub pulse_speed_ms: u64,
+    pub beep_interval_ms: u64,
+    pub spinner_speed_ms: u64,
+    // Sound frequencies
     pub success_freq1: f32,
     pub success_freq2: f32,
     pub success_duration1: u64,
@@ -55,6 +65,11 @@ impl Default for Config {
             volume_percent: 80,
             sync_color_sound: false,
             pulse_with_beeps: true,
+            // Speed defaults
+            pulse_speed_ms: 300,
+            beep_interval_ms: 50,
+            spinner_speed_ms: 100,
+            // Sound defaults
             success_freq1: 440.0,
             success_freq2: 880.0,
             success_duration1: 200,
@@ -83,6 +98,9 @@ impl Config {
              volume_percent = {}\n\
              sync_color_sound = {}\n\
              pulse_with_beeps = {}\n\
+             pulse_speed_ms = {}\n\
+             beep_interval_ms = {}\n\
+             spinner_speed_ms = {}\n\
              \n\
              [success]\n\
              freq1 = {}\n\
@@ -108,6 +126,7 @@ impl Config {
              duration = {}\n\
              beep_count = {}\n",
             self.audio_enabled, self.volume_percent, self.sync_color_sound, self.pulse_with_beeps,
+            self.pulse_speed_ms, self.beep_interval_ms, self.spinner_speed_ms,
             self.success_freq1, self.success_freq2, self.success_duration1, self.success_duration2, self.success_beep_count,
             self.error_freq1, self.error_freq2, self.error_duration1, self.error_duration2, self.error_beep_count,
             self.warning_freq, self.warning_duration, self.warning_beep_count,
@@ -150,6 +169,21 @@ impl Config {
                     "audio_enabled"    => config.audio_enabled    = value == "true",
                     "sync_color_sound" => config.sync_color_sound = value == "true",
                     "pulse_with_beeps" => config.pulse_with_beeps = value == "true",
+                    "pulse_speed_ms"   => {
+                        if let Ok(v) = value.parse::<u64>() {
+                            config.pulse_speed_ms = v;
+                        }
+                    }
+                    "beep_interval_ms" => {
+                        if let Ok(v) = value.parse::<u64>() {
+                            config.beep_interval_ms = v;
+                        }
+                    }
+                    "spinner_speed_ms" => {
+                        if let Ok(v) = value.parse::<u64>() {
+                            config.spinner_speed_ms = v;
+                        }
+                    }
                     "volume_percent"   => {
                         if let Ok(v) = value.parse::<u32>() {
                             config.volume_percent = v.clamp(0, 100);
@@ -240,6 +274,9 @@ pub fn apply_config(config: &Config) {
     *SOUND_ENABLED.lock().unwrap()    = config.audio_enabled;
     *SYNC_COLOR_SOUND.lock().unwrap() = config.sync_color_sound;
     *PULSE_ENABLED.lock().unwrap()    = config.pulse_with_beeps;
+    *PULSE_SPEED_MS.lock().unwrap()   = config.pulse_speed_ms;
+    *BEEP_INTERVAL_MS.lock().unwrap() = config.beep_interval_ms;
+    *SPINNER_SPEED_MS.lock().unwrap() = config.spinner_speed_ms;
 
     // Update the in-memory cache so per-message calls don't touch the filesystem.
     *CACHED_CONFIG.lock().unwrap() = config.clone();
@@ -359,6 +396,15 @@ fn make_bold(text: &str) -> String {
     format!("\x1b[1m{}\x1b[0m", text)
 }
 
+/// Helper function to colorize text
+fn colorize_text(text: &str, color: Color) -> String {
+    if *COLOR_ENABLED.lock().unwrap() {
+        text.color(color).to_string()
+    } else {
+        text.to_string()
+    }
+}
+
 /// Print a message, optionally pulsing bold and playing a sound.
 fn synchronized_message<F>(text: &str, beep_count: usize, sound_func: F)
 where
@@ -382,6 +428,179 @@ where
             let _ = sound_func();
         }
     }
+}
+
+// ── Speed Helper Functions ────────────────────────────────────────────────────
+
+pub fn get_pulse_speed_ms() -> u64 {
+    *PULSE_SPEED_MS.lock().unwrap()
+}
+
+pub fn get_beep_interval_ms() -> u64 {
+    *BEEP_INTERVAL_MS.lock().unwrap()
+}
+
+pub fn get_spinner_speed_ms() -> u64 {
+    *SPINNER_SPEED_MS.lock().unwrap()
+}
+
+pub fn set_pulse_speed_ms(speed_ms: u64) {
+    *PULSE_SPEED_MS.lock().unwrap() = speed_ms;
+    let mut config = get_config();
+    config.pulse_speed_ms = speed_ms;
+    save_config(&config);
+}
+
+pub fn set_beep_interval_ms(interval_ms: u64) {
+    *BEEP_INTERVAL_MS.lock().unwrap() = interval_ms;
+    let mut config = get_config();
+    config.beep_interval_ms = interval_ms;
+    save_config(&config);
+}
+
+pub fn set_spinner_speed_ms(speed_ms: u64) {
+    *SPINNER_SPEED_MS.lock().unwrap() = speed_ms;
+    let mut config = get_config();
+    config.spinner_speed_ms = speed_ms;
+    save_config(&config);
+}
+
+// ── Pulse Functions ──────────────────────────────────────────────────────────
+
+/// Display a message that pulses (alternates between normal and bold) with musical beeps
+pub fn pulse_musical(text: &str, color: Color, times: usize) {
+    let beep_count = get_beep_count(Some(SoundType::Success));
+    let pulse_speed = get_pulse_speed_ms();
+    
+    for i in 0..times {
+        if *PULSE_ENABLED.lock().unwrap() {
+            print!("\r\x1b[K{}", make_bold(&colorize_text(text, color)));
+        } else {
+            print!("\r\x1b[K{}", colorize_text(text, color));
+        }
+        io::stdout().flush().unwrap();
+        
+        if *SOUND_ENABLED.lock().unwrap() && beep_count > 0 {
+            let _ = sound::play_success();
+        }
+        
+        if i < times - 1 {
+            thread::sleep(Duration::from_millis(pulse_speed));
+            
+            if *PULSE_ENABLED.lock().unwrap() {
+                print!("\r\x1b[K{}", colorize_text(text, color));
+            } else {
+                print!("\r\x1b[K{}", colorize_text(text, color));
+            }
+            io::stdout().flush().unwrap();
+            thread::sleep(Duration::from_millis(pulse_speed));
+        }
+    }
+    println!();
+}
+
+/// Display a message that pulses gently with warning sounds
+pub fn pulse_gentle(text: &str, color: Color, times: usize) {
+    let beep_count = get_beep_count(Some(SoundType::Warning));
+    let pulse_speed = get_pulse_speed_ms();
+    
+    for i in 0..times {
+        if *PULSE_ENABLED.lock().unwrap() {
+            print!("\r\x1b[K{}", make_bold(&colorize_text(text, color)));
+        } else {
+            print!("\r\x1b[K{}", colorize_text(text, color));
+        }
+        io::stdout().flush().unwrap();
+        
+        if *SOUND_ENABLED.lock().unwrap() && beep_count > 0 {
+            let _ = sound::play_warning();
+        }
+        
+        if i < times - 1 {
+            thread::sleep(Duration::from_millis(pulse_speed));
+            
+            if *PULSE_ENABLED.lock().unwrap() {
+                print!("\r\x1b[K{}", colorize_text(text, color));
+            } else {
+                print!("\r\x1b[K{}", colorize_text(text, color));
+            }
+            io::stdout().flush().unwrap();
+            thread::sleep(Duration::from_millis(pulse_speed));
+        }
+    }
+    println!();
+}
+
+/// Display a message that pulses with error sounds (dissonant)
+pub fn pulse_with_error_sound(text: &str, color: Color, times: usize) {
+    let beep_count = get_beep_count(Some(SoundType::Error));
+    let pulse_speed = get_pulse_speed_ms();
+    
+    for i in 0..times {
+        if *PULSE_ENABLED.lock().unwrap() {
+            print!("\r\x1b[K{}", make_bold(&colorize_text(text, color)));
+        } else {
+            print!("\r\x1b[K{}", colorize_text(text, color));
+        }
+        io::stdout().flush().unwrap();
+        
+        if *SOUND_ENABLED.lock().unwrap() && beep_count > 0 {
+            let _ = sound::play_error();
+        }
+        
+        if i < times - 1 {
+            thread::sleep(Duration::from_millis(pulse_speed));
+            
+            if *PULSE_ENABLED.lock().unwrap() {
+                print!("\r\x1b[K{}", colorize_text(text, color));
+            } else {
+                print!("\r\x1b[K{}", colorize_text(text, color));
+            }
+            io::stdout().flush().unwrap();
+            thread::sleep(Duration::from_millis(pulse_speed));
+        }
+    }
+    println!();
+}
+
+/// Display a message that pulses with custom sound configuration
+pub fn pulse_custom(text: &str, color: Color, sound_type: SoundType, times: usize) {
+    let beep_count = get_beep_count(Some(sound_type));
+    let pulse_speed = get_pulse_speed_ms();
+    
+    for i in 0..times {
+        if *PULSE_ENABLED.lock().unwrap() {
+            print!("\r\x1b[K{}", make_bold(&colorize_text(text, color)));
+        } else {
+            print!("\r\x1b[K{}", colorize_text(text, color));
+        }
+        io::stdout().flush().unwrap();
+        
+        if *SOUND_ENABLED.lock().unwrap() && beep_count > 0 {
+            match sound_type {
+                SoundType::Success => { let _ = sound::play_success(); }
+                SoundType::Error => { let _ = sound::play_error(); }
+                SoundType::Warning | SoundType::Notification => { let _ = sound::play_warning(); }
+                SoundType::Beep => {
+                    let config = get_config();
+                    let _ = sound::play_beep_pub(config.beep_freq, config.beep_duration);
+                }
+            }
+        }
+        
+        if i < times - 1 {
+            thread::sleep(Duration::from_millis(pulse_speed));
+            
+            if *PULSE_ENABLED.lock().unwrap() {
+                print!("\r\x1b[K{}", colorize_text(text, color));
+            } else {
+                print!("\r\x1b[K{}", colorize_text(text, color));
+            }
+            io::stdout().flush().unwrap();
+            thread::sleep(Duration::from_millis(pulse_speed));
+        }
+    }
+    println!();
 }
 
 // ── Color / sound toggles with sync support ───────────────────────────────────
@@ -478,15 +697,12 @@ pub fn warn<M: AsRef<str>>(msg: M) {
     synchronized_message(&text, beep_count, || sound::play_warning());
 }
 
-pub fn info<M: AsRef<str>>(msg: M) {
-    let is_colored = *COLOR_ENABLED.lock().unwrap();
-    let text = if is_colored {
+pub fn info<M: AsRef<str>>(msg: M) -> String {
+    if *COLOR_ENABLED.lock().unwrap() {
         format!("{} {}", colors::info(), msg.as_ref().blue())
     } else {
         format!("[i] {}", msg.as_ref())
-    };
-    // info has no sound — beep_count 0 skips the sound path entirely
-    synchronized_message(&text, 0, || Ok(()));
+    }
 }
 
 pub fn critical<M: AsRef<str>>(msg: M) {
@@ -501,11 +717,11 @@ pub fn critical<M: AsRef<str>>(msg: M) {
     synchronized_message(&text, beep_count, || sound::play_error());
 }
 
-pub fn colored<M: AsRef<str>>(msg: M, color: Color) {
+pub fn colored<M: AsRef<str>>(msg: M, color: Color) -> String {
     if *COLOR_ENABLED.lock().unwrap() {
-        println!("{}", msg.as_ref().color(color).bold());
+        msg.as_ref().color(color).bold().to_string()
     } else {
-        println!("{}", msg.as_ref());
+        msg.as_ref().to_string()
     }
 }
 
@@ -532,18 +748,19 @@ pub fn progress<M: AsRef<str>>(msg: M) {
     *GLOBAL_SPINNER_RUNNING.lock().unwrap() = true;
     let message = msg.as_ref().to_string();
     let colors_enabled = *COLOR_ENABLED.lock().unwrap();
+    let spinner_speed = get_spinner_speed_ms();
 
     thread::spawn(move || {
         let frames = ["◐", "◓", "◑", "◒"];
         let mut i = 0;
         while *GLOBAL_SPINNER_RUNNING.lock().unwrap() {
             if colors_enabled {
-                print!("\r{} {}", frames[i].cyan(), message);
+                print!("\r{} {}", frames[i].bold().cyan(), message);
             } else {
                 print!("\r{} {}", frames[i], message);
             }
             std::io::Write::flush(&mut std::io::stdout()).unwrap();
-            thread::sleep(Duration::from_millis(100));
+            thread::sleep(Duration::from_millis(spinner_speed));
             i = (i + 1) % frames.len();
         }
     });
@@ -585,18 +802,19 @@ impl SpinnerHandle {
         let running_clone = running.clone();
         let message       = msg.as_ref().to_string();
         let colors_enabled = *COLOR_ENABLED.lock().unwrap();
+        let spinner_speed = get_spinner_speed_ms();
 
         thread::spawn(move || {
             let frames = ["◐", "◓", "◑", "◒"];
             let mut i = 0;
             while *running_clone.lock().unwrap() {
                 if colors_enabled {
-                    print!("\r{} {}", frames[i].cyan(), message);
+                    print!("\r{} {}", frames[i].bold().cyan(), message);
                 } else {
                     print!("\r{} {}", frames[i], message);
                 }
                 std::io::Write::flush(&mut std::io::stdout()).unwrap();
-                thread::sleep(Duration::from_millis(100));
+                thread::sleep(Duration::from_millis(spinner_speed));
                 i = (i + 1) % frames.len();
             }
         });
@@ -729,6 +947,19 @@ impl Default for MessageBuilder {
     fn default() -> Self { Self::new("") }
 }
 
+// ── Compatibility modules for backward compatibility ─────────────────────────
+
+pub mod color_utils {
+    pub fn info() -> String { crate::info("") }
+    pub fn status_valid() -> String { crate::status_valid() }
+    pub fn status_warn() -> String { crate::status_warn() }
+    pub fn status_error() -> String { crate::status_error() }
+}
+
+pub mod audio_utils {
+    pub use crate::{pulse_musical, pulse_gentle, pulse_with_error_sound, pulse_custom};
+}
+
 // ── Macros ────────────────────────────────────────────────────────────────────
 
 #[macro_export]
@@ -790,6 +1021,9 @@ mod tests {
         assert_eq!(config.success_beep_count, 2);
         assert_eq!(config.error_beep_count,   2);
         assert_eq!(config.warning_beep_count, 2);
+        assert_eq!(config.pulse_speed_ms, 300);
+        assert_eq!(config.beep_interval_ms, 50);
+        assert_eq!(config.spinner_speed_ms, 100);
     }
 
     #[test]
@@ -802,6 +1036,9 @@ mod tests {
         assert_eq!(parsed.error_beep_count,    original.error_beep_count);
         assert_eq!(parsed.warning_beep_count,  original.warning_beep_count);
         assert_eq!(parsed.beep_count,          original.beep_count);
+        assert_eq!(parsed.pulse_speed_ms,      original.pulse_speed_ms);
+        assert_eq!(parsed.beep_interval_ms,    original.beep_interval_ms);
+        assert_eq!(parsed.spinner_speed_ms,    original.spinner_speed_ms);
         assert!((parsed.success_freq1 - original.success_freq1).abs() < 0.01);
         assert!((parsed.error_freq1   - original.error_freq1  ).abs() < 0.01);
         assert!((parsed.warning_freq  - original.warning_freq ).abs() < 0.01);
@@ -816,6 +1053,9 @@ audio_enabled = true
 volume_percent = 80
 sync_color_sound = false
 pulse_with_beeps = true
+pulse_speed_ms = 200
+beep_interval_ms = 30
+spinner_speed_ms = 50
 
 [success]
 freq1 = 440
@@ -846,6 +1086,9 @@ beep_count = 1
         assert_eq!(cfg.error_beep_count,   4);
         assert_eq!(cfg.warning_beep_count, 3);
         assert_eq!(cfg.beep_count,         1);
+        assert_eq!(cfg.pulse_speed_ms,     200);
+        assert_eq!(cfg.beep_interval_ms,   30);
+        assert_eq!(cfg.spinner_speed_ms,   50);
         assert!((cfg.success_freq1 - 440.0).abs() < 0.01);
         assert!((cfg.error_freq1   - 220.0).abs() < 0.01);
         assert!((cfg.warning_freq  - 660.0).abs() < 0.01);
